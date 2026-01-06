@@ -32,6 +32,26 @@ body {
   border-radius: 10px;
 }
 
+.drop-zone {
+  border: 2px dashed rgba(79, 70, 229, 0.35);
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.6);
+  transition: background 120ms ease, border-color 120ms ease, transform 120ms ease;
+  cursor: pointer;
+  user-select: none;
+}
+
+.drop-zone-inner {
+  padding: 22px 18px;
+  text-align: center;
+}
+
+.drop-zone.dragover {
+  border-color: rgba(79, 70, 229, 0.85);
+  background: rgba(99, 102, 241, 0.08);
+  transform: translateY(-1px);
+}
+
 .image-row {
   display: flex;
   justify-content: space-between;

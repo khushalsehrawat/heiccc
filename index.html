@@ -37,10 +37,26 @@
         </p>
 
         <!-- Upload -->
-        <input type="file" id="fileInput" multiple webkitdirectory hidden accept="image/*,.heic,.heif">
-        <button id="btnUpload" class="btn btn-primary btn-lg mb-3">
-          <i class="bi bi-upload me-2"></i>Select Images / Folder
-        </button>
+        <input type="file" id="fileInput" multiple hidden accept="image/*,.heic,.heif">
+        <input type="file" id="folderInput" multiple webkitdirectory hidden accept="image/*,.heic,.heif">
+
+        <div class="d-flex flex-wrap gap-2 mb-3">
+          <button id="btnUpload" class="btn btn-primary btn-lg">
+            <i class="bi bi-image me-2"></i>Select Images
+          </button>
+          <button id="btnUploadFolder" class="btn btn-outline-primary btn-lg">
+            <i class="bi bi-folder2-open me-2"></i>Select Folder
+          </button>
+        </div>
+
+        <!-- Drag & Drop -->
+        <div id="dropZone" class="drop-zone mb-3" role="button" tabindex="0" aria-label="Drop images or folders here">
+          <div class="drop-zone-inner">
+            <i class="bi bi-cloud-arrow-up fs-3"></i>
+            <div class="mt-2 fw-semibold">Drag & drop images or a folder here</div>
+            <div class="text-muted small">or click to browse</div>
+          </div>
+        </div>
 
         <!-- Folder Info -->
         <div id="folderInfo" class="alert alert-light d-none"></div>
@@ -106,4 +122,3 @@
 <script src="app.js"></script>
 </body>
 </html>
-

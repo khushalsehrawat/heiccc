@@ -1,0 +1,53 @@
+body {
+  background: linear-gradient(135deg, #f8fbff, #eef3ff);
+  min-height: 100vh;
+}
+
+.glass-card {
+  background: rgba(255, 255, 255, 0.85);
+  border-radius: 18px;
+  border: none;
+  box-shadow: 0 25px 60px rgba(0, 0, 0, 0.08);
+  backdrop-filter: blur(10px);
+}
+
+.text-gradient {
+  background: linear-gradient(90deg, #4f46e5, #06b6d4);
+  -webkit-background-clip: text;
+  color: transparent;
+}
+
+.btn-primary {
+  background: linear-gradient(90deg, #4f46e5, #6366f1);
+  border: none;
+}
+
+.btn-success {
+  background: linear-gradient(90deg, #06b6d4, #22c55e);
+  border: none;
+}
+
+.progress {
+  height: 10px;
+  border-radius: 10px;
+}
+
+.image-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+
+.image-row-left {
+  flex: 1;
+  min-width: 0;
+}
+
+.image-row small {
+  color: #6b7280;
+}
+
+.image-row input {
+  transform: scale(1.2);
+}

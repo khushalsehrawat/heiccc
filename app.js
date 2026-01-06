@@ -7,6 +7,9 @@
 
 const fileInput = document.getElementById("fileInput");
 const btnUpload = document.getElementById("btnUpload");
+const folderInput = document.getElementById("folderInput");
+const btnUploadFolder = document.getElementById("btnUploadFolder");
+const dropZone = document.getElementById("dropZone");
 const btnConvert = document.getElementById("btnConvert");
 
 const folderInfo = document.getElementById("folderInfo");
@@ -26,6 +29,7 @@ const progressBar = document.getElementById("progressBar");
 const progressText = document.getElementById("progressText");
 
 let images = [];
+let sourceRootFolder = "";
 
 function syncQualityLabel() {
   qLabel.textContent = qualityInput.value;
@@ -33,36 +37,84 @@ function syncQualityLabel() {
 qualityInput.oninput = syncQualityLabel;
 syncQualityLabel();
 
-btnUpload.onclick = () => fileInput.click();
+btnUpload?.addEventListener("click", () => fileInput?.click());
+btnUploadFolder?.addEventListener("click", () => folderInput?.click());
 
-fileInput.onchange = () => {
-  const allFiles = [...fileInput.files];
-  const picked = allFiles.filter(isImageLikeFile);
+dropZone?.addEventListener("click", () => fileInput?.click());
+dropZone?.addEventListener("keydown", e => {
+  if (e.key === "Enter" || e.key === " ") fileInput?.click();
+});
 
-  images = picked.map(file => ({
+["dragenter", "dragover", "dragleave", "drop"].forEach(evt => {
+  dropZone?.addEventListener(evt, e => {
+    e.preventDefault();
+    e.stopPropagation();
+  });
+});
+
+["dragenter", "dragover"].forEach(evt => {
+  dropZone?.addEventListener(evt, () => dropZone.classList.add("dragover"));
+});
+
+["dragleave", "drop"].forEach(evt => {
+  dropZone?.addEventListener(evt, () => dropZone.classList.remove("dragover"));
+});
+
+if (fileInput) fileInput.onchange = () => loadPickedFiles([...fileInput.files]);
+if (folderInput) folderInput.onchange = () => loadPickedFiles([...folderInput.files]);
+
+dropZone?.addEventListener("drop", async e => {
+  try {
+    const filesWithPaths = await getFilesFromDataTransfer(e.dataTransfer);
+    loadPickedFiles(filesWithPaths);
+  } catch (err) {
+    folderInfo.classList.remove("d-none");
+    folderInfo.innerHTML = `Drop failed: ${escapeHtml(normalizeErrorMessage(err))}`;
+  }
+});
+
+function loadPickedFiles(filesOrFilesWithPaths) {
+  const all = filesOrFilesWithPaths.map(f => {
+    if (f && typeof f === "object" && "file" in f) return f;
+    return { file: f, relativePath: f?.webkitRelativePath || "" };
+  });
+
+  const picked = all.filter(({ file }) => isImageLikeFile(file));
+
+  sourceRootFolder = detectCommonRootFolder(picked);
+
+  images = picked.map(({ file, relativePath }) => ({
     file,
+    relativePath: relativePath || "",
     selected: true,
     status: "pending", // pending | converting | converted | error
     outputs: [],
     error: null
   }));
 
-  if (!images.length) return;
+  if (!images.length) {
+    folderInfo.classList.remove("d-none");
+    folderInfo.innerHTML = `<strong>0</strong> images loaded`;
+    imageItems.innerHTML = "";
+    imageList.classList.add("d-none");
+    btnConvert.disabled = true;
+    return;
+  }
 
-  const folderName =
-    images[0].file.webkitRelativePath?.split("/")[0] || "Images";
-
-  outputNameInput.value = folderName + "_JPG";
+  if (!outputNameInput.value.trim()) {
+    const suggestion = suggestOutputFolderName(picked, sourceRootFolder);
+    outputNameInput.value = suggestion + "_JPG";
+  }
 
   folderInfo.classList.remove("d-none");
-  const skipped = allFiles.length - picked.length;
+  const skipped = all.length - picked.length;
   folderInfo.innerHTML =
     `<strong>${images.length}</strong> images loaded` +
     (skipped ? ` <span class="text-muted">(skipped ${skipped} non-images)</span>` : "");
 
   renderImageList();
   btnConvert.disabled = false;
-};
+}
 
 function renderImageList() {
   imageItems.innerHTML = "";
@@ -74,12 +126,12 @@ function renderImageList() {
     row.dataset.row = String(index);
 
     const { badgeClass, badgeText } = getStatusBadge(img);
-    const fileName = escapeHtml(img.file.name);
+    const displayName = escapeHtml(stripSourceRoot(img.relativePath) || img.file.name);
 
     row.innerHTML = `
       <div class="image-row-left">
         <input type="checkbox" ${img.selected ? "checked" : ""} data-index="${index}">
-        <span class="ms-2">${fileName}</span>
+        <span class="ms-2">${displayName}</span>
         <small class="ms-2">(${formatBytes(img.file.size)})</small>
         <span class="badge ${badgeClass} ms-2" data-status>${badgeText}</span>
       </div>
@@ -158,6 +210,7 @@ btnConvert.onclick = async () => {
 
   let processed = 0;
   let outputsAdded = 0;
+  const usedZipPaths = new Set();
 
   for (const index of selectedIndexes) {
     processed += 1;
@@ -173,7 +226,11 @@ btnConvert.onclick = async () => {
     try {
       const outputs = await convertToJpegOutputs(img.file, { quality, outputExt });
       for (const out of outputs) {
-        folder.file(out.fileName, out.blob);
+        const rel = stripSourceRoot(img.relativePath);
+        const destPath = rel ? parentDir(rel) : "";
+        const destFolder = destPath ? folder.folder(destPath) : folder;
+        const uniqueName = uniqueFileName(out.fileName, usedZipPaths, destPath);
+        destFolder.file(uniqueName, out.blob);
         outputsAdded += 1;
       }
       img.outputs = outputs;
@@ -221,8 +278,23 @@ function isAlreadyJpeg(file) {
   return n.endsWith(".jpg") || n.endsWith(".jpeg") || n.endsWith(".jfif");
 }
 
+function suggestOutputFolderName(filesWithPaths, rootFolder) {
+  if (rootFolder) return rootFolder;
+  const first = filesWithPaths.find(f => f.file)?.file;
+  const firstRel = filesWithPaths.find(f => f.relativePath)?.relativePath || first?.webkitRelativePath || "";
+  const fromRel = String(firstRel).split("/")[0];
+  return fromRel || "Images";
+}
+
 function baseName(fileName) {
   return String(fileName || "image").replace(/\.[^/.]+$/, "");
+}
+
+function parentDir(path) {
+  const p = String(path || "").replace(/\\/g, "/");
+  const parts = p.split("/").filter(Boolean);
+  if (parts.length <= 1) return "";
+  return parts.slice(0, -1).join("/");
 }
 
 function outputNameFor(fileName, outputExt, index, total) {
@@ -281,6 +353,30 @@ async function downloadOutputs(img) {
   for (const out of outputs) folder.file(out.fileName, out.blob);
   const blob = await zip.generateAsync({ type: "blob" });
   saveAs(blob, `${baseName(img.file.name)}.zip`);
+}
+
+function uniqueFileName(fileName, usedPaths, destPath) {
+  const name = String(fileName || "image.jpg");
+  const prefix = destPath ? `${destPath}/` : "";
+  const full = `${prefix}${name}`;
+  if (!usedPaths.has(full)) {
+    usedPaths.add(full);
+    return name;
+  }
+
+  const extMatch = name.match(/(\.[^/.]+)$/);
+  const ext = extMatch ? extMatch[1] : "";
+  const stem = ext ? name.slice(0, -ext.length) : name;
+  let i = 2;
+  while (true) {
+    const candidate = `${stem}-${i}${ext}`;
+    const fullCandidate = `${prefix}${candidate}`;
+    if (!usedPaths.has(fullCandidate)) {
+      usedPaths.add(fullCandidate);
+      return candidate;
+    }
+    i += 1;
+  }
 }
 
 function downloadButtonLabel(img) {
@@ -394,4 +490,74 @@ function canvasToBlob(canvas, type, quality) {
   return new Promise(resolve => {
     canvas.toBlob(blob => resolve(blob), type, quality);
   });
+}
+
+function detectCommonRootFolder(filesWithPaths) {
+  const roots = new Set();
+  for (const fp of filesWithPaths) {
+    const rp = String(fp.relativePath || "");
+    if (!rp.includes("/")) return "";
+    const root = rp.split("/")[0];
+    if (!root) return "";
+    roots.add(root);
+    if (roots.size > 1) return "";
+  }
+  return roots.values().next().value || "";
+}
+
+function stripSourceRoot(relativePath) {
+  const rp = String(relativePath || "").replace(/\\/g, "/");
+  if (!sourceRootFolder) return rp;
+  const prefix = `${sourceRootFolder}/`;
+  if (rp.startsWith(prefix)) return rp.slice(prefix.length);
+  return rp;
+}
+
+async function getFilesFromDataTransfer(dataTransfer) {
+  if (!dataTransfer) return [];
+
+  const items = [...(dataTransfer.items || [])];
+  const hasEntries = items.some(it => typeof it.webkitGetAsEntry === "function");
+
+  if (!items.length || !hasEntries) {
+    return [...(dataTransfer.files || [])].map(file => ({
+      file,
+      relativePath: file?.webkitRelativePath || ""
+    }));
+  }
+
+  const results = [];
+  for (const item of items) {
+    const entry = item.webkitGetAsEntry?.();
+    if (!entry) continue;
+    const collected = await collectFilesFromEntry(entry, "");
+    results.push(...collected);
+  }
+  return results;
+}
+
+async function collectFilesFromEntry(entry, basePath) {
+  if (entry.isFile) {
+    const file = await new Promise((resolve, reject) => {
+      entry.file(resolve, reject);
+    });
+    return [{ file, relativePath: `${basePath}${file.name}` }];
+  }
+
+  if (!entry.isDirectory) return [];
+
+  const dirPath = `${basePath}${entry.name}/`;
+  const reader = entry.createReader();
+  const entries = [];
+
+  while (true) {
+    const batch = await new Promise((resolve, reject) => {
+      reader.readEntries(resolve, reject);
+    });
+    if (!batch.length) break;
+    entries.push(...batch);
+  }
+
+  const nested = await Promise.all(entries.map(e => collectFilesFromEntry(e, dirPath)));
+  return nested.flat();
 }

@@ -3,6 +3,11 @@
   - HEIC/HEIF → JPEG via native decode when possible, else heic2any
   - Other image types → JPEG via Canvas
   - Bulk download as ZIP + per-image download
+
+  Fixes included:
+  - Handles NotReadableError (cloud/permission/locked files) with assertFileReadable()
+  - Skips unreadable files during drag-drop folder traversal (won't break whole drop)
+  - Better UI banner + safer error normalization
 */
 
 const fileInput = document.getElementById("fileInput");
@@ -31,11 +36,22 @@ const progressText = document.getElementById("progressText");
 let images = [];
 let sourceRootFolder = "";
 
-function syncQualityLabel() {
-  qLabel.textContent = qualityInput.value;
+/* ---------------- UI helpers ---------------- */
+
+function showBanner(html, variant = "light") {
+  if (!folderInfo) return;
+  folderInfo.className = `alert alert-${variant}`;
+  folderInfo.classList.remove("d-none");
+  folderInfo.innerHTML = html;
 }
-qualityInput.oninput = syncQualityLabel;
+
+function syncQualityLabel() {
+  if (qLabel && qualityInput) qLabel.textContent = qualityInput.value;
+}
+if (qualityInput) qualityInput.oninput = syncQualityLabel;
 syncQualityLabel();
+
+/* ---------------- Event wiring ---------------- */
 
 btnUpload?.addEventListener("click", () => fileInput?.click());
 btnUploadFolder?.addEventListener("click", () => folderInput?.click());
@@ -68,13 +84,135 @@ dropZone?.addEventListener("drop", async e => {
     const filesWithPaths = await getFilesFromDataTransfer(e.dataTransfer);
     loadPickedFiles(filesWithPaths);
   } catch (err) {
-    folderInfo.classList.remove("d-none");
-    folderInfo.innerHTML = `Drop failed: ${escapeHtml(normalizeErrorMessage(err))}`;
+    showBanner(`Drop failed: ${escapeHtml(normalizeErrorMessage(err))}`, "danger");
   }
 });
 
+imageItems?.addEventListener("change", e => {
+  if (e.target?.type === "checkbox") {
+    const idx = Number(e.target.dataset.index);
+    if (Number.isFinite(idx) && images[idx]) images[idx].selected = e.target.checked;
+  }
+});
+
+imageItems?.addEventListener("click", async e => {
+  const btn = e.target?.closest?.("[data-download]");
+  if (!btn) return;
+
+  const index = Number(btn.dataset.download);
+  const img = images[index];
+  if (!img?.outputs?.length) return;
+
+  try {
+    await downloadOutputs(img);
+  } catch (err) {
+    showBanner(`Download failed: ${escapeHtml(normalizeErrorMessage(err))}`, "danger");
+  }
+});
+
+if (selectAllBtn) {
+  selectAllBtn.onclick = () => {
+    images.forEach(i => (i.selected = true));
+    renderImageList();
+  };
+}
+
+if (clearAllBtn) {
+  clearAllBtn.onclick = () => {
+    images.forEach(i => (i.selected = false));
+    renderImageList();
+  };
+}
+
+if (btnConvert) {
+  btnConvert.onclick = async () => {
+    try {
+      const selectedIndexes = images
+        .map((img, index) => (img.selected ? index : -1))
+        .filter(index => index !== -1);
+
+      if (!selectedIndexes.length) return;
+
+      btnConvert.disabled = true;
+      progressWrap?.classList.remove("d-none");
+
+      const zip = new JSZip();
+      const outputFolderName = (outputNameInput?.value || "").trim() || "Converted";
+      const folder = zip.folder(outputFolderName);
+      const quality = Number(qualityInput?.value || 90) / 100;
+      const outputExt = outputExtSelect?.value || "jpg";
+
+      let processed = 0;
+      let outputsAdded = 0;
+      const usedZipPaths = new Set();
+
+      for (const index of selectedIndexes) {
+        processed += 1;
+        if (progressText)
+          progressText.textContent = `Converting ${processed} of ${selectedIndexes.length}`;
+        if (progressBar)
+          progressBar.style.width = `${(processed / selectedIndexes.length) * 100}%`;
+
+        const img = images[index];
+        img.status = "converting";
+        img.outputs = [];
+        img.error = null;
+        updateImageRow(index);
+
+        try {
+          const outputs = await convertToJpegOutputs(img.file, { quality, outputExt });
+
+          for (const out of outputs) {
+            const rel = stripSourceRoot(img.relativePath);
+            const destPath = rel ? parentDir(rel) : "";
+            const destFolder = destPath ? folder.folder(destPath) : folder;
+            const uniqueName = uniqueFileName(out.fileName, usedZipPaths, destPath);
+            destFolder.file(uniqueName, out.blob);
+            outputsAdded += 1;
+          }
+
+          img.outputs = outputs;
+          img.status = "converted";
+        } catch (err) {
+          img.status = "error";
+          img.error = normalizeErrorMessage(err);
+        } finally {
+          updateImageRow(index);
+        }
+      }
+
+      if (outputsAdded) {
+        try {
+          const zipBlob = await zip.generateAsync({ type: "blob" });
+          saveAs(zipBlob, `${outputFolderName}.zip`);
+        } catch (err) {
+          showBanner(
+            `Converted, but ZIP download failed: ${escapeHtml(normalizeErrorMessage(err))}`,
+            "warning"
+          );
+        }
+      }
+
+      const failures = selectedIndexes.filter(i => images[i].status === "error").length;
+      if (progressText) {
+        progressText.textContent =
+          failures
+            ? `Done. Converted ${selectedIndexes.length - failures}/${selectedIndexes.length} (failed ${failures}).`
+            : `Done. Converted ${selectedIndexes.length}/${selectedIndexes.length}.`;
+      }
+    } catch (err) {
+      showBanner(`Conversion failed: ${escapeHtml(normalizeErrorMessage(err))}`, "danger");
+      if (progressText) progressText.textContent = "Conversion failed.";
+    } finally {
+      btnConvert.disabled = false;
+    }
+  };
+}
+
+/* ---------------- Core flow ---------------- */
+
 function loadPickedFiles(filesOrFilesWithPaths) {
-  const all = filesOrFilesWithPaths.map(f => {
+  const all = (filesOrFilesWithPaths || []).map(f => {
     if (f && typeof f === "object" && "file" in f) return f;
     return { file: f, relativePath: f?.webkitRelativePath || "" };
   });
@@ -93,30 +231,32 @@ function loadPickedFiles(filesOrFilesWithPaths) {
   }));
 
   if (!images.length) {
-    folderInfo.classList.remove("d-none");
-    folderInfo.innerHTML = `<strong>0</strong> images loaded`;
-    imageItems.innerHTML = "";
-    imageList.classList.add("d-none");
-    btnConvert.disabled = true;
+    showBanner(`<strong>0</strong> images loaded`, "light");
+    if (imageItems) imageItems.innerHTML = "";
+    imageList?.classList.add("d-none");
+    if (btnConvert) btnConvert.disabled = true;
     return;
   }
 
-  if (!outputNameInput.value.trim()) {
+  if (outputNameInput && !outputNameInput.value.trim()) {
     const suggestion = suggestOutputFolderName(picked, sourceRootFolder);
-    outputNameInput.value = suggestion + "_JPG";
+    outputNameInput.value = `${suggestion}_JPG`;
   }
 
-  folderInfo.classList.remove("d-none");
   const skipped = all.length - picked.length;
-  folderInfo.innerHTML =
+  showBanner(
     `<strong>${images.length}</strong> images loaded` +
-    (skipped ? ` <span class="text-muted">(skipped ${skipped} non-images)</span>` : "");
+      (skipped ? ` <span class="text-muted">(skipped ${skipped} non-images)</span>` : ""),
+    "light"
+  );
 
   renderImageList();
-  btnConvert.disabled = false;
+  if (btnConvert) btnConvert.disabled = false;
 }
 
 function renderImageList() {
+  if (!imageItems || !imageList) return;
+
   imageItems.innerHTML = "";
   imageList.classList.remove("d-none");
 
@@ -135,15 +275,19 @@ function renderImageList() {
         <small class="ms-2">(${formatBytes(img.file.size)})</small>
         <span class="badge ${badgeClass} ms-2" data-status>${badgeText}</span>
       </div>
-      <button class="btn btn-sm btn-outline-primary" data-download="${index}" ${img.outputs?.length ? "" : "disabled"}>
+      <button class="btn btn-sm btn-outline-primary" data-download="${index}" ${
+        img.outputs?.length ? "" : "disabled"
+      }>
         ${downloadButtonLabel(img)}
       </button>
     `;
+
     imageItems.appendChild(row);
   });
 }
 
 function updateImageRow(index) {
+  if (!imageItems) return;
   const row = imageItems.querySelector(`[data-row="${index}"]`);
   if (!row) return;
 
@@ -155,8 +299,7 @@ function updateImageRow(index) {
     const { badgeClass, badgeText } = getStatusBadge(img);
     statusEl.className = `badge ${badgeClass} ms-2`;
     statusEl.textContent = badgeText;
-    if (img.status === "error" && img.error) statusEl.title = img.error;
-    else statusEl.title = "";
+    statusEl.title = img.status === "error" && img.error ? img.error : "";
   }
 
   if (downloadBtn) {
@@ -165,97 +308,7 @@ function updateImageRow(index) {
   }
 }
 
-imageItems.addEventListener("change", e => {
-  if (e.target.type === "checkbox") {
-    images[e.target.dataset.index].selected = e.target.checked;
-  }
-});
-
-imageItems.addEventListener("click", async e => {
-  const btn = e.target.closest("[data-download]");
-  if (!btn) return;
-
-  const index = Number(btn.dataset.download);
-  const img = images[index];
-  if (!img?.outputs?.length) return;
-
-  await downloadOutputs(img);
-});
-
-selectAllBtn.onclick = () => {
-  images.forEach(i => (i.selected = true));
-  renderImageList();
-};
-
-clearAllBtn.onclick = () => {
-  images.forEach(i => (i.selected = false));
-  renderImageList();
-};
-
-btnConvert.onclick = async () => {
-  const selectedIndexes = images
-    .map((img, index) => (img.selected ? index : -1))
-    .filter(index => index !== -1);
-
-  if (!selectedIndexes.length) return;
-
-  btnConvert.disabled = true;
-  progressWrap.classList.remove("d-none");
-
-  const zip = new JSZip();
-  const outputFolderName = (outputNameInput.value || "").trim() || "Converted";
-  const folder = zip.folder(outputFolderName);
-  const quality = Number(qualityInput.value) / 100;
-  const outputExt = outputExtSelect.value || "jpg";
-
-  let processed = 0;
-  let outputsAdded = 0;
-  const usedZipPaths = new Set();
-
-  for (const index of selectedIndexes) {
-    processed += 1;
-    progressText.textContent = `Converting ${processed} of ${selectedIndexes.length}`;
-    progressBar.style.width = `${(processed / selectedIndexes.length) * 100}%`;
-
-    const img = images[index];
-    img.status = "converting";
-    img.outputs = [];
-    img.error = null;
-    updateImageRow(index);
-
-    try {
-      const outputs = await convertToJpegOutputs(img.file, { quality, outputExt });
-      for (const out of outputs) {
-        const rel = stripSourceRoot(img.relativePath);
-        const destPath = rel ? parentDir(rel) : "";
-        const destFolder = destPath ? folder.folder(destPath) : folder;
-        const uniqueName = uniqueFileName(out.fileName, usedZipPaths, destPath);
-        destFolder.file(uniqueName, out.blob);
-        outputsAdded += 1;
-      }
-      img.outputs = outputs;
-      img.status = "converted";
-    } catch (err) {
-      img.status = "error";
-      img.error = normalizeErrorMessage(err);
-    } finally {
-      updateImageRow(index);
-    }
-  }
-
-  if (outputsAdded) {
-    const zipBlob = await zip.generateAsync({ type: "blob" });
-    saveAs(zipBlob, `${outputFolderName}.zip`);
-  }
-
-  const failures = selectedIndexes.filter(i => images[i].status === "error").length;
-  progressText.textContent =
-    failures
-      ? `Done. Converted ${selectedIndexes.length - failures}/${selectedIndexes.length} (failed ${failures}).`
-      : `Done. Converted ${selectedIndexes.length}/${selectedIndexes.length}.`;
-
-  btnConvert.disabled = false;
-};
+/* ---------------- File type helpers ---------------- */
 
 function isImageLikeFile(file) {
   if (file?.type?.startsWith("image/")) return true;
@@ -278,10 +331,32 @@ function isAlreadyJpeg(file) {
   return n.endsWith(".jpg") || n.endsWith(".jpeg") || n.endsWith(".jfif");
 }
 
+/* ---------------- Key fix: readability check ---------------- */
+
+async function assertFileReadable(file) {
+  try {
+    // Reads just 1 byte so it's fast, but validates access.
+    await file.slice(0, 1).arrayBuffer();
+    return true;
+  } catch (e) {
+    const name = e?.name || "NotReadableError";
+    throw new Error(
+      `${name}: Browser can’t read this file. ` +
+        `If it’s from OneDrive/Google Drive/iCloud, first download it (not online-only) or move to Desktop/Downloads. ` +
+        `Also close any app that may be using the file.`
+    );
+  }
+}
+
+/* ---------------- Conversion ---------------- */
+
 function suggestOutputFolderName(filesWithPaths, rootFolder) {
   if (rootFolder) return rootFolder;
   const first = filesWithPaths.find(f => f.file)?.file;
-  const firstRel = filesWithPaths.find(f => f.relativePath)?.relativePath || first?.webkitRelativePath || "";
+  const firstRel =
+    filesWithPaths.find(f => f.relativePath)?.relativePath ||
+    first?.webkitRelativePath ||
+    "";
   const fromRel = String(firstRel).split("/")[0];
   return fromRel || "Images";
 }
@@ -306,18 +381,26 @@ function outputNameFor(fileName, outputExt, index, total) {
 async function convertToJpegOutputs(file, { quality, outputExt }) {
   if (!file) throw new Error("Missing file");
 
+  // ✅ prevent NotReadableError from blowing up mid-pipeline
+  await assertFileReadable(file);
+
   const ext = outputExt === "jpeg" ? "jpeg" : "jpg";
 
+  // If already JPEG and quality is max, just clone the bytes into a Blob.
+  // (Cloning avoids some odd cases with FileSaver in certain browsers.)
   if (isAlreadyJpeg(file) && quality === 1) {
-    return [{ fileName: outputNameFor(file.name, ext, 0, 1), blob: file }];
+    const blob = await cloneToMemoryBlob(file);
+    return [{ fileName: outputNameFor(file.name, ext, 0, 1), blob }];
   }
 
+  // HEIC/HEIF: try native decode via Canvas first (works on some browsers),
+  // else fallback to heic2any.
   if (isHeicFile(file)) {
     try {
       const nativeBlob = await convertViaCanvas(file, quality);
       return [{ fileName: outputNameFor(file.name, ext, 0, 1), blob: nativeBlob }];
     } catch {
-      // Fall back to heic2any below
+      // fallback
     }
 
     const result = await heic2any({
@@ -335,9 +418,12 @@ async function convertToJpegOutputs(file, { quality, outputExt }) {
     }));
   }
 
+  // Other formats: Canvas → JPEG
   const blob = await convertViaCanvas(file, quality);
   return [{ fileName: outputNameFor(file.name, ext, 0, 1), blob }];
 }
+
+/* ---------------- Downloads ---------------- */
 
 async function downloadOutputs(img) {
   const outputs = img.outputs || [];
@@ -354,6 +440,8 @@ async function downloadOutputs(img) {
   const blob = await zip.generateAsync({ type: "blob" });
   saveAs(blob, `${baseName(img.file.name)}.zip`);
 }
+
+/* ---------------- ZIP name de-dup ---------------- */
 
 function uniqueFileName(fileName, usedPaths, destPath) {
   const name = String(fileName || "image.jpg");
@@ -398,10 +486,18 @@ function getStatusBadge(img) {
   }
 }
 
+/* ---------------- Error + text helpers ---------------- */
+
 function normalizeErrorMessage(err) {
   if (!err) return "Unknown error";
+
+  if (typeof DOMException !== "undefined" && err instanceof DOMException) {
+    return `${err.name}: ${err.message || "Operation failed"}`;
+  }
+
   if (typeof err === "string") return err;
   if (err instanceof Error && err.message) return err.message;
+
   try {
     return JSON.stringify(err);
   } catch {
@@ -436,6 +532,8 @@ function formatBytes(bytes) {
   const value = b / Math.pow(1024, i);
   return `${value.toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
 }
+
+/* ---------------- Canvas conversion ---------------- */
 
 async function convertViaCanvas(file, quality) {
   const canvas = document.createElement("canvas");
@@ -492,6 +590,28 @@ function canvasToBlob(canvas, type, quality) {
   });
 }
 
+/* ---------------- Safe cloning for JPEG passthrough ---------------- */
+
+async function cloneToMemoryBlob(fileOrBlob) {
+  const buf = await readBlobAsArrayBuffer(fileOrBlob);
+  const type = (fileOrBlob && fileOrBlob.type) || "application/octet-stream";
+  return new Blob([buf], { type });
+}
+
+async function readBlobAsArrayBuffer(blob) {
+  if (!blob) throw new Error("Missing blob");
+  if (typeof blob.arrayBuffer === "function") return await blob.arrayBuffer();
+
+  return await new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(reader.error || new Error("Failed to read file"));
+    reader.onload = () => resolve(reader.result);
+    reader.readAsArrayBuffer(blob);
+  });
+}
+
+/* ---------------- Folder/path handling ---------------- */
+
 function detectCommonRootFolder(filesWithPaths) {
   const roots = new Set();
   for (const fp of filesWithPaths) {
@@ -512,6 +632,8 @@ function stripSourceRoot(relativePath) {
   if (rp.startsWith(prefix)) return rp.slice(prefix.length);
   return rp;
 }
+
+/* ---------------- Drag & drop folder traversal ---------------- */
 
 async function getFilesFromDataTransfer(dataTransfer) {
   if (!dataTransfer) return [];
@@ -538,10 +660,19 @@ async function getFilesFromDataTransfer(dataTransfer) {
 
 async function collectFilesFromEntry(entry, basePath) {
   if (entry.isFile) {
-    const file = await new Promise((resolve, reject) => {
-      entry.file(resolve, reject);
-    });
-    return [{ file, relativePath: `${basePath}${file.name}` }];
+    try {
+      const file = await new Promise((resolve, reject) => {
+        entry.file(resolve, reject);
+      });
+
+      // ✅ prevent NotReadableError from breaking whole drop
+      await assertFileReadable(file);
+
+      return [{ file, relativePath: `${basePath}${file.name}` }];
+    } catch (e) {
+      console.warn("Skipping unreadable file:", basePath, entry?.name, e);
+      return [];
+    }
   }
 
   if (!entry.isDirectory) return [];

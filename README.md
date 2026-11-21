@@ -14,7 +14,7 @@ The project uses plain HTML, CSS and JavaScript. Bootstrap, Bootstrap Icons, hei
 
 The official public site URL has not been supplied. Once verified, add a canonical link, `og:url`, and the WebSite `url` using HEIC2JPG's own public URL. The developer website must not be used as the converter's canonical URL. No social preview image is configured because no suitable image asset is present.
 
-The visible footer credit uses `rel="noopener noreferrer nofollow"` for the promotional developer link. Structured data describes the creator; it does not guarantee search rich results.
+The visible footer credit uses `rel="nofollow"` for the promotional developer link. Structured data describes the creator; it does not guarantee search rich results.
 
 ## Development
 
